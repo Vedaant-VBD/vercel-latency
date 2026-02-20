@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List
 import json
-import numpy as np
+import statistics
 
 app = FastAPI()
 
@@ -9,44 +11,67 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
-import os
+# Load telemetry data
+with open("telemetry.json", "r") as f:
+    telemetry_data = json.load(f)
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-file_path = os.path.join(BASE_DIR, "q-vercel-latency.json")
+class AnalysisRequest(BaseModel):
+    regions: List[str]
+    threshold_ms: int
 
-with open(file_path) as f:
-    data = json.load(f)
+class RegionMetrics(BaseModel):
+    avg_latency: float
+    p95_latency: float
+    avg_uptime: float
+    breaches: int
 
-@app.post("/api/analytics")
-async def analytics(payload: dict):
-    regions = payload.get("regions", [])
-    threshold = payload.get("threshold_ms", 0)
-
-    result = {}
-
-    for region in regions:
-        region_records = [r for r in data if r["region"] == region]
-
-        latencies = [r["latency_ms"] for r in region_records]
-        uptimes = [r["uptime"] for r in region_records]
-
-        if not latencies:
+@app.post("/")
+def analyze(payload: AnalysisRequest):
+    results = {}
+    
+    for region in payload.regions:
+        # Filter data for this region
+        region_data = [record for record in telemetry_data if record["region"] == region]
+        
+        if not region_data:
             continue
-
-        avg_latency = sum(latencies) / len(latencies)
-        p95_latency = np.percentile(latencies, 95)
-        avg_uptime = sum(uptimes) / len(uptimes)
-        breaches = sum(1 for l in latencies if l > threshold)
-
-        result[region] = {
+        
+        # Extract latencies and uptimes
+        latencies = [record["latency_ms"] for record in region_data]
+        uptimes = [record["uptime_pct"] for record in region_data]
+        
+        # Calculate metrics
+        avg_latency = statistics.mean(latencies)
+        
+        # Calculate 95th percentile using linear interpolation
+        sorted_latencies = sorted(latencies)
+        n = len(sorted_latencies)
+        index = 0.95 * (n - 1)
+        lower = int(index)
+        upper = lower + 1
+        fraction = index - lower
+        
+        if upper < n:
+            p95_latency = sorted_latencies[lower] + fraction * (sorted_latencies[upper] - sorted_latencies[lower])
+        else:
+            p95_latency = sorted_latencies[lower]
+        
+        avg_uptime = statistics.mean(uptimes)
+        
+        # Count breaches (records above threshold)
+        breaches = sum(1 for lat in latencies if lat > payload.threshold_ms)
+        
+        results[region] = {
             "avg_latency": round(avg_latency, 2),
-            "p95_latency": round(float(p95_latency), 2),
-            "avg_uptime": round(avg_uptime, 4),
+            "p95_latency": round(p95_latency, 2),
+            "avg_uptime": round(avg_uptime, 2),
             "breaches": breaches
         }
-
-    return result
+    
+    return {"regions": results}
