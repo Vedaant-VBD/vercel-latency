@@ -1,13 +1,22 @@
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 import json
 import os
 
-# Load telemetry file safely
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["POST"],
+    allow_headers=["*"],
+)
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 file_path = os.path.join(BASE_DIR, "q-vercel-latency.json")
 
 with open(file_path) as f:
     data = json.load(f)
-
 
 def percentile(values, percent):
     values = sorted(values)
@@ -16,35 +25,11 @@ def percentile(values, percent):
     c = min(f + 1, len(values) - 1)
     if f == c:
         return values[int(k)]
-    d0 = values[f] * (c - k)
-    d1 = values[c] * (k - f)
-    return d0 + d1
+    return values[f] + (values[c] - values[f]) * (k - f)
 
-
-def handler(request):
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type"
-            },
-            "body": ""
-        }
-
-    # Only allow POST
-    if request.method != "POST":
-        return {
-            "statusCode": 405,
-            "headers": {
-                "Access-Control-Allow-Origin": "*"
-            },
-            "body": json.dumps({"error": "Method not allowed"})
-        }
-
-    payload = request.json()
+@app.post("/api/analytics")
+async def analytics(request: Request):
+    payload = await request.json()
     regions = payload.get("regions", [])
     threshold = payload.get("threshold_ms", 0)
 
@@ -58,25 +43,11 @@ def handler(request):
         latencies = [r["latency_ms"] for r in records]
         uptimes = [r["uptime"] for r in records]
 
-        avg_latency = sum(latencies) / len(latencies)
-        p95_latency = percentile(latencies, 95)
-        avg_uptime = sum(uptimes) / len(uptimes)
-        breaches = sum(1 for l in latencies if l > threshold)
-
         result[region] = {
-            "avg_latency": round(avg_latency, 2),
-            "p95_latency": round(p95_latency, 2),
-            "avg_uptime": round(avg_uptime, 4),
-            "breaches": breaches
+            "avg_latency": round(sum(latencies)/len(latencies), 2),
+            "p95_latency": round(percentile(latencies, 95), 2),
+            "avg_uptime": round(sum(uptimes)/len(uptimes), 4),
+            "breaches": sum(1 for l in latencies if l > threshold)
         }
 
-    return {
-        "statusCode": 200,
-        "headers": {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Content-Type": "application/json"
-        },
-        "body": json.dumps(result)
-    }
+    return result
