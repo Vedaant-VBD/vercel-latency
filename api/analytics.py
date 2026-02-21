@@ -1,77 +1,82 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List
 import json
-import statistics
+import os
 
-app = FastAPI()
+# Load telemetry file safely
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+file_path = os.path.join(BASE_DIR, "q-vercel-latency.json")
 
-# Enable CORS for all origins
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"],
-)
+with open(file_path) as f:
+    data = json.load(f)
 
-# Load telemetry data
-with open("telemetry.json", "r") as f:
-    telemetry_data = json.load(f)
 
-class AnalysisRequest(BaseModel):
-    regions: List[str]
-    threshold_ms: int
+def percentile(values, percent):
+    values = sorted(values)
+    k = (len(values) - 1) * (percent / 100)
+    f = int(k)
+    c = min(f + 1, len(values) - 1)
+    if f == c:
+        return values[int(k)]
+    d0 = values[f] * (c - k)
+    d1 = values[c] * (k - f)
+    return d0 + d1
 
-class RegionMetrics(BaseModel):
-    avg_latency: float
-    p95_latency: float
-    avg_uptime: float
-    breaches: int
 
-@app.post("/")
-def analyze(payload: AnalysisRequest):
-    results = {}
-    
-    for region in payload.regions:
-        # Filter data for this region
-        region_data = [record for record in telemetry_data if record["region"] == region]
-        
-        if not region_data:
+def handler(request):
+    # Handle CORS preflight
+    if request.method == "OPTIONS":
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type"
+            },
+            "body": ""
+        }
+
+    # Only allow POST
+    if request.method != "POST":
+        return {
+            "statusCode": 405,
+            "headers": {
+                "Access-Control-Allow-Origin": "*"
+            },
+            "body": json.dumps({"error": "Method not allowed"})
+        }
+
+    payload = request.json()
+    regions = payload.get("regions", [])
+    threshold = payload.get("threshold_ms", 0)
+
+    result = {}
+
+    for region in regions:
+        records = [r for r in data if r["region"] == region]
+        if not records:
             continue
-        
-        # Extract latencies and uptimes
-        latencies = [record["latency_ms"] for record in region_data]
-        uptimes = [record["uptime_pct"] for record in region_data]
-        
-        # Calculate metrics
-        avg_latency = statistics.mean(latencies)
-        
-        # Calculate 95th percentile using linear interpolation
-        sorted_latencies = sorted(latencies)
-        n = len(sorted_latencies)
-        index = 0.95 * (n - 1)
-        lower = int(index)
-        upper = lower + 1
-        fraction = index - lower
-        
-        if upper < n:
-            p95_latency = sorted_latencies[lower] + fraction * (sorted_latencies[upper] - sorted_latencies[lower])
-        else:
-            p95_latency = sorted_latencies[lower]
-        
-        avg_uptime = statistics.mean(uptimes)
-        
-        # Count breaches (records above threshold)
-        breaches = sum(1 for lat in latencies if lat > payload.threshold_ms)
-        
-        results[region] = {
+
+        latencies = [r["latency_ms"] for r in records]
+        uptimes = [r["uptime"] for r in records]
+
+        avg_latency = sum(latencies) / len(latencies)
+        p95_latency = percentile(latencies, 95)
+        avg_uptime = sum(uptimes) / len(uptimes)
+        breaches = sum(1 for l in latencies if l > threshold)
+
+        result[region] = {
             "avg_latency": round(avg_latency, 2),
             "p95_latency": round(p95_latency, 2),
-            "avg_uptime": round(avg_uptime, 2),
+            "avg_uptime": round(avg_uptime, 4),
             "breaches": breaches
         }
-    
-    return {"regions": results}
+
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Content-Type": "application/json"
+        },
+        "body": json.dumps(result)
+    }
