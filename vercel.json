@@ -1,8 +1,7 @@
 {
-  "builds": [
-    { "src": "api/analytics.py", "use": "@vercel/python" }
-  ],
-  "routes": [
-    { "src": "/api/analytics", "dest": "api/analytics.py" }
-  ]
+  "functions": {
+    "api/*.py": {
+      "runtime": "python3.11"
+    }
+  }
 }
